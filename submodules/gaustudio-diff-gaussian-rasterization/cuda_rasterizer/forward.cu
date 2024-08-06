@@ -70,8 +70,49 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 	return glm::max(result, 0.0f);
 }
 
+// // Forward version of 2D covariance matrix computation
+// __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
+// {
+// 	// The following models the steps outlined by equations 29
+// 	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
+// 	// Additionally considers aspect / scaling of viewport.
+// 	// Transposes used to account for row-/column-major conventions.
+// 	float3 t = transformPoint4x3(mean, viewmatrix);
+
+// 	const float limx = 1.3f * tan_fovx;
+// 	const float limy = 1.3f * tan_fovy;
+// 	const float txtz = t.x / t.z;
+// 	const float tytz = t.y / t.z;
+// 	t.x = min(limx, max(-limx, txtz)) * t.z;
+// 	t.y = min(limy, max(-limy, tytz)) * t.z;
+
+// 	glm::mat3 J = glm::mat3(
+// 		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
+// 		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+// 		0, 0, 0);
+
+// 	glm::mat3 W = glm::mat3(
+// 		viewmatrix[0], viewmatrix[4], viewmatrix[8],
+// 		viewmatrix[1], viewmatrix[5], viewmatrix[9],
+// 		viewmatrix[2], viewmatrix[6], viewmatrix[10]);
+
+// 	glm::mat3 T = W * J;
+
+// 	glm::mat3 Vrk = glm::mat3(
+// 		cov3D[0], cov3D[1], cov3D[2],
+// 		cov3D[1], cov3D[3], cov3D[4],
+// 		cov3D[2], cov3D[4], cov3D[5]);
+
+// 	glm::mat3 cov = glm::transpose(T) * glm::transpose(Vrk) * T;
+
+// 	// Apply low-pass filter: every Gaussian should be at least
+// 	// one pixel wide/high. Discard 3rd row and column.
+// 	cov[0][0] += 0.3f;
+// 	cov[1][1] += 0.3f;
+// 	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
+// }
 // Forward version of 2D covariance matrix computation
-__device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
+__device__ void computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix, float3* output, float& coef)
 {
 	// The following models the steps outlined by equations 29
 	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
@@ -81,15 +122,23 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 
 	const float limx = 1.3f * tan_fovx;
 	const float limy = 1.3f * tan_fovy;
-	const float txtz = t.x / t.z;
-	const float tytz = t.y / t.z;
+	float txtz = t.x / t.z;
+	float tytz = t.y / t.z;
 	t.x = min(limx, max(-limx, txtz)) * t.z;
 	t.y = min(limy, max(-limy, tytz)) * t.z;
+	txtz = t.x / t.z;
+	tytz = t.y / t.z;
 
 	glm::mat3 J = glm::mat3(
 		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
 		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
 		0, 0, 0);
+
+	float l = sqrt(t.x*t.x+t.y*t.y+t.z*t.z);
+	glm::mat3 Jn = glm::mat3(
+		1 / t.z, 0.0f, -(t.x) / (t.z * t.z),
+		0.0f, 1 / t.z, -(t.y) / (t.z * t.z),
+		t.x/l, t.y/l, t.z/l);
 
 	glm::mat3 W = glm::mat3(
 		viewmatrix[0], viewmatrix[4], viewmatrix[8],
@@ -104,12 +153,91 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 		cov3D[2], cov3D[4], cov3D[5]);
 
 	glm::mat3 cov = glm::transpose(T) * glm::transpose(Vrk) * T;
+	output[0] = { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
+	const float det_0 = max(1e-6, cov[0][0] * cov[1][1] - cov[0][1] * cov[0][1]);
+	const float det_1 = max(1e-6, (cov[0][0] + kernel_size) * (cov[1][1] + kernel_size) - cov[0][1] * cov[0][1]);
+	coef = sqrt(det_0 / (det_1+1e-6) + 1e-6);
+	if (det_0 <= 1e-6 || det_1 <= 1e-6){
+		coef = 0.0f;
+	}
 
-	// Apply low-pass filter: every Gaussian should be at least
-	// one pixel wide/high. Discard 3rd row and column.
-	cov[0][0] += 0.3f;
-	cov[1][1] += 0.3f;
-	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
+	// glm::mat3 testm = glm::mat3{
+	// 	1,2,3,
+	// 	4,5,6,
+	// 	7,8,9,
+	// };
+	// glm::vec3 testv = {1,1,1};
+	// glm::vec3 resultm = testm * testv;
+	// printf("%f %f %f\n", resultm[0], resultm[1],resultm[2]); 12.000000 15.000000 18.000000
+
+	glm::mat3 Vrk_eigen_vector;
+	glm::vec3 Vrk_eigen_value;
+	int D = glm::findEigenvaluesSymReal(Vrk,Vrk_eigen_value,Vrk_eigen_vector);
+
+	unsigned int min_id = Vrk_eigen_value[0]>Vrk_eigen_value[1]? (Vrk_eigen_value[1]>Vrk_eigen_value[2]?2:1):(Vrk_eigen_value[0]>Vrk_eigen_value[2]?2:0);
+
+	glm::mat3 Vrk_inv;
+	bool well_conditioned = Vrk_eigen_value[min_id]>0.00000001;
+	glm::vec3 eigenvector_min;
+	if(well_conditioned)
+	{
+		glm::mat3 diag = glm::mat3( 1/Vrk_eigen_value[0], 0, 0,
+									0, 1/Vrk_eigen_value[1], 0,
+									0, 0, 1/Vrk_eigen_value[2] );
+		Vrk_inv = Vrk_eigen_vector * diag * glm::transpose(Vrk_eigen_vector);
+	}
+	else
+	{
+		if(D<3)
+		{
+			const glm::vec3 eigenvector1 = Vrk_eigen_vector[(min_id+1)%3];
+			const glm::vec3 eigenvector2 = Vrk_eigen_vector[(min_id+2)%3];
+			eigenvector_min = glm::cross(eigenvector1, eigenvector2);
+		}
+		else{
+			eigenvector_min = Vrk_eigen_vector[min_id];
+		}
+		Vrk_inv = glm::outerProduct(eigenvector_min,eigenvector_min);
+	}
+	
+	glm::mat3 cov_cam_inv = glm::transpose(W) * Vrk_inv * W;
+	glm::vec3 uvh = {txtz, tytz, 1};
+	glm::vec3 uvh_m = cov_cam_inv * uvh;
+	glm::vec3 uvh_mn = glm::normalize(uvh_m);
+	if(isnan(uvh_mn.x))
+	{
+		output[1] = {0, 0, 0};
+		output[2] = {0, 0, 0};
+	}
+	else
+	{
+		float u2 = txtz * txtz;
+		float v2 = tytz * tytz;
+		float uv = txtz * tytz;
+
+		glm::mat3 nJ_inv = glm::mat3(
+			v2 + 1,	-uv, 		0,
+			-uv,	u2 + 1,		0,
+			-txtz,	-tytz,		0
+		);
+
+
+		float vb = glm::dot(uvh_mn, uvh);
+		float factor = t.z / (u2+v2+1);
+		float factor_normal = l / (u2+v2+1);
+		glm::vec3 plane = nJ_inv * (uvh_mn/max(vb,0.0000001f));
+		glm::vec2 ray_depth_plane = {plane[0]*factor, plane[1]*factor};
+		glm::vec3 ray_normal_vector = {-plane[0]*factor_normal, -plane[1]*factor_normal, -1};
+		glm::vec3 cam_normal_vector = Jn * ray_normal_vector;
+		glm::vec3 normal_vector = glm::normalize(cam_normal_vector);
+
+		output[1] = { 	ray_depth_plane.x, 
+						ray_depth_plane.y, 
+						0};
+		output[2] = { 	normal_vector.x, 
+						normal_vector.y, 
+						normal_vector.z};
+	}
 }
 
 // Forward method for converting scale and rotation properties of each
@@ -172,6 +300,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	int* radii,
 	float2* points_xy_image,
 	float* depths,
+	float2* depths_plane,
+
 	float* cov3Ds,
 	float* rgb,
 	float4* conic_opacity,
@@ -213,7 +343,13 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 
 	// Compute 2D screen-space covariance matrix
-	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+	// float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+
+	// Compute 2D screen-space covariance matrix
+	float3 cov_planeinfo[3];
+	float ceof;
+	computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix, cov_planeinfo, ceof);
+	const float3& cov = cov_planeinfo[0];
 
 	// Invert covariance (EWA algorithm)
 	float det = (cov.x * cov.z - cov.y * cov.y);
@@ -250,6 +386,9 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	depths[idx] = p_view.z;
 	radii[idx] = my_radius;
 	points_xy_image[idx] = point_image;
+
+	depths_plane[idx] = {cov_planeinfo[1].x, cov_planeinfo[1].y};
+
 	// Inverse 2D covariance and opacity neatly pack into one float4
 	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx] };
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
@@ -264,9 +403,13 @@ renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
 	int W, int H,
+	const float focal_x, 
+	const float focal_y,
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
 	const float* __restrict__ depths,
+	const float2* __restrict__ depths_plane,
+
 	const float4* __restrict__ conic_opacity,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
@@ -274,6 +417,8 @@ renderCUDA(
 	float* __restrict__ out_color,
 	float* __restrict__ out_depth,
 	float* __restrict__ out_median_depth,
+	float* __restrict__ out_depth_rade,
+	float* __restrict__ out_middepth_rade,
 	float* __restrict__ out_opacity)
 {
 	// Identify current tile and associated min/max pixel range.
@@ -300,6 +445,7 @@ renderCUDA(
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
 	__shared__ float collected_depth[BLOCK_SIZE];
+	__shared__ float2 collected_depths_plane[BLOCK_SIZE];
 
 	// Initialize helper variables
 	float T = 1.0f;
@@ -310,7 +456,8 @@ renderCUDA(
 	float median_D = 15.0f;
 	float median_weight = 0;
 	float median_id = 0;
-
+	float D_rade = 0;
+	float mD_rade = 0;
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
@@ -328,6 +475,8 @@ renderCUDA(
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
 			collected_depth[block.thread_rank()] = depths[coll_id];
+			float2 depth_plane = depths_plane[coll_id]; 
+			collected_depths_plane[block.thread_rank()] = {depth_plane.x/focal_x,depth_plane.y/focal_y};
 		}
 		block.sync();
 
@@ -346,6 +495,12 @@ renderCUDA(
 			if (power > 0.0f)
 				continue;
 
+			float depth_center = collected_depth[j];
+			float2 depth_plane = collected_depths_plane[j];
+			float depth = depth_center + (depth_plane.x * d.x + depth_plane.y * d.y);
+			// if (depth <= NEAR_PLANE)
+			// 	continue;
+
 			// Eq. (2) from 3D Gaussian splatting paper.
 			// Obtain alpha by multiplying with Gaussian opacity
 			// and its exponential falloff from mean.
@@ -363,6 +518,8 @@ renderCUDA(
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+
+			D_rade += depth * alpha * T;
 			D += depths[collected_id[j]] * alpha * T;
 			// Median depth:
             if (T > 0.5f && test_T < 0.5)
@@ -371,6 +528,8 @@ renderCUDA(
 				median_D = dep;
 				median_weight = alpha * T;
 				median_id = collected_id[j];
+				mD_rade = depth;
+
 			}
 			T = test_T;
 
@@ -393,6 +552,8 @@ renderCUDA(
 		out_median_depth[H * W + pix_id] = median_weight;
 		out_median_depth[2*H*W + pix_id] = median_id;
 		out_opacity[pix_id] = 1-T;
+		out_depth_rade[pix_id] = D_rade;
+		out_middepth_rade[pix_id] = mD_rade;
 	}
 }
 
@@ -401,9 +562,12 @@ void FORWARD::render(
 	const uint2* ranges,
 	const uint32_t* point_list,
 	int W, int H,
+	const float focal_x, float focal_y,
 	const float2* means2D,
 	const float* colors,
 	const float* depths,
+	const float2* depths_plane,
+
 	const float4* conic_opacity,
 	float* final_T,
 	uint32_t* n_contrib,
@@ -411,15 +575,20 @@ void FORWARD::render(
 	float* out_color,
 	float* out_depth,
 	float* out_median_depth,
+	float* out_depth_rade,
+	float* out_middepth_rade,
 	float* out_opacity)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,
 		W, H,
+		focal_x,
+		focal_y,
 		means2D,
 		colors,
 		depths,
+		depths_plane,
 		conic_opacity,
 		final_T,
 		n_contrib,
@@ -427,6 +596,8 @@ void FORWARD::render(
 		out_color,
 		out_depth,
 		out_median_depth,
+		out_depth_rade,
+		out_middepth_rade,
 		out_opacity);
 }
 
@@ -449,6 +620,8 @@ void FORWARD::preprocess(int P, int D, int M,
 	int* radii,
 	float2* means2D,
 	float* depths,
+	float2* depths_plane,
+
 	float* cov3Ds,
 	float* rgb,
 	float4* conic_opacity,
@@ -476,6 +649,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		radii,
 		means2D,
 		depths,
+		depths_plane,
 		cov3Ds,
 		rgb,
 		conic_opacity,

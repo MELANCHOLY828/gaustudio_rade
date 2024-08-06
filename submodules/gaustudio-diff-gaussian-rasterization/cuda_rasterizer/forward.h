@@ -17,6 +17,7 @@
 #include "device_launch_parameters.h"
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
+#include <glm/gtx/pca.hpp>
 
 namespace FORWARD
 {
@@ -40,6 +41,8 @@ namespace FORWARD
 		int* radii,
 		float2* points_xy_image,
 		float* depths,
+		float2* depths_plane,
+
 		float* cov3Ds,
 		float* colors,
 		float4* conic_opacity,
@@ -53,9 +56,11 @@ namespace FORWARD
 		const uint2* ranges,
 		const uint32_t* point_list,
 		int W, int H,
+		const float focal_x, float focal_y,
 		const float2* points_xy_image,
 		const float* features,
 		const float* depth,
+		const float2* depths_plane,
 		const float4* conic_opacity,
 		float* final_T,
 		uint32_t* n_contrib,
@@ -63,6 +68,8 @@ namespace FORWARD
 		float* out_color,
 		float* out_depth,
 		float* out_median_depth,
+		float* out_depth_rade,
+		float* out_middepth_rade,
 		float* out_opacity);
 }
 

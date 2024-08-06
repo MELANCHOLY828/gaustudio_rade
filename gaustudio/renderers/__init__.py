@@ -26,3 +26,5 @@ def make(config):
     return renderer
 
 from . import vanilla_renderer, mip_renderer, scaffold_renderer, surfel_renderer, pcd_renderer
+#
+# from . import vanilla_renderer, mip_renderer, scaffold_renderer, pcd_renderer
